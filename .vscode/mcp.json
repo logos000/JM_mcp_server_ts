@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "jm-mcp-server-ts": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["e:\\AAProgramming\\mcp_server\\jm-mcp-server-ts\\build\\server\\index.js"]
+    }
+  }
+}

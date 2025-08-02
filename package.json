@@ -1,0 +1,46 @@
+{
+  "name": "jm-mcp-server-ts",
+  "version": "1.0.0",
+  "description": "A Model Context Protocol (MCP) server for JM comic download and PDF conversion (TypeScript version)",
+  "main": "build/server/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/server/index.js",
+    "dev": "tsc && node build/server/index.js",
+    "clean": "rimraf build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "mcp",
+    "jmcomic",
+    "typescript",
+    "model-context-protocol",
+    "comic",
+    "pdf"
+  ],
+  "author": "jm",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.1",
+    "axios": "^1.11.0",
+    "cheerio": "^1.0.0",
+    "crypto-js": "^4.2.0",
+    "fs-extra": "^11.2.0",
+    "js-yaml": "^4.1.0",
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.34.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/fs-extra": "^11.0.4",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.1.0",
+    "rimraf": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
