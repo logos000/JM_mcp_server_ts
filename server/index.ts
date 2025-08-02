@@ -22,7 +22,8 @@ import axios from "axios";
 import * as fs from "fs-extra";
 import * as path from "path";
 import * as yaml from "js-yaml";
-import sharp from "sharp";
+const jimp = require('jimp');
+const Jimp = jimp.Jimp;
 import CryptoJS from "crypto-js";
 import { PDFDocument } from "pdf-lib";
 import { SimpleJMDownloader } from "../src/simple-jm-downloader.js";
@@ -835,6 +836,7 @@ class PDFConverter {
   // 转换图片为PDF
   async convertImagesToPdf(inputFolder: string, outputPath: string, pdfName: string): Promise<boolean> {
     const startTime = Date.now();
+    // 优先支持JPG格式，因为我们的下载器现在输出JPG
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
 
     try {
@@ -908,22 +910,40 @@ class PDFConverter {
         return false;
       }
 
-      console.log(`[转换] 转换中：${pdfName}`);
+      console.log(`[转换] 转换中：${pdfName} (${imagePaths.length} 张图片)`);
       console.log(`开始生成PDF：${pdfFullPath}`);
 
       // 创建PDF文档
       const pdfDoc = await PDFDocument.create();
 
       // 处理每张图片
-      for (const imagePath of imagePaths) {
+      for (let i = 0; i < imagePaths.length; i++) {
+        const imagePath = imagePaths[i];
         try {
-          // 使用sharp处理图片
-          const imageBuffer = await sharp(imagePath)
-            .jpeg({ quality: 85 })
-            .toBuffer();
+          console.log(`[转换] 处理图片 ${i + 1}/${imagePaths.length}: ${path.basename(imagePath)}`);
+          
+          const fileExtension = path.extname(imagePath).toLowerCase();
+          let imageBuffer: Buffer;
+          let isJpeg = false;
+
+          // 优化：如果是JPG文件，直接读取而不重新编码
+          if (fileExtension === '.jpg' || fileExtension === '.jpeg') {
+            console.log(`[转换] 直接读取JPG文件: ${path.basename(imagePath)}`);
+            imageBuffer = await fs.readFile(imagePath);
+            isJpeg = true;
+          } else {
+            // 对于其他格式，使用jimp转换为JPEG
+            console.log(`[转换] 使用jimp转换 ${fileExtension} 为JPEG: ${path.basename(imagePath)}`);
+            const jimpImage = await Jimp.read(imagePath);
+            imageBuffer = await jimpImage.quality(85).getBuffer(Jimp.MIME_JPEG);
+            isJpeg = true;
+          }
 
           // 将图片添加到PDF
-          const image = await pdfDoc.embedJpg(imageBuffer);
+          const image = isJpeg ? 
+            await pdfDoc.embedJpg(imageBuffer) : 
+            await pdfDoc.embedPng(imageBuffer);
+          
           const { width, height } = image.scale(1);
           
           const page = pdfDoc.addPage([width, height]);
@@ -933,17 +953,22 @@ class PDFConverter {
             width,
             height,
           });
+          
+          console.log(`[转换] 图片 ${i + 1} 添加成功 (${width}x${height})`);
         } catch (error) {
-          console.warn(`警告：无法处理图片 ${imagePath}，原因：${error}`);
+          console.warn(`[转换] 警告：无法处理图片 ${imagePath}，原因：${error}`);
         }
       }
 
       // 保存PDF
+      console.log(`[转换] 保存PDF文件...`);
       const pdfBytes = await pdfDoc.save();
       await fs.writeFile(pdfFullPath, pdfBytes);
 
+      const fileSize = (pdfBytes.length / 1024 / 1024).toFixed(2);
       console.log(`[成功] 成功生成PDF：${pdfFullPath}`);
-      console.log(`处理完成，耗时 ${(Date.now() - startTime) / 1000} 秒`);
+      console.log(`[成功] PDF大小：${fileSize} MB，包含 ${imagePaths.length} 张图片`);
+      console.log(`[成功] 处理完成，耗时 ${(Date.now() - startTime) / 1000} 秒`);
       return true;
 
     } catch (error) {

@@ -5,6 +5,28 @@
  */
 import { JmOption, JmDownloaderInterface, JmcomicClient, JmAlbumDetail, JmPhotoDetail, DirRule, AdvancedDict } from './types';
 export declare const __version__ = "2.6.4";
+export declare class JmImageTool {
+    /**
+     * 获取Jimp图片的尺寸（兼容不同版本的Jimp）
+     */
+    private static getImageSize;
+    /**
+     * 获得图片分割数 - 完全对应Python版本
+     */
+    static getNum(scrambleId: number | string, aid: number | string, filename: string): number;
+    /**
+     * 从文件名提取不带扩展名的部分
+     */
+    static getFileName(filename: string, withoutExtension?: boolean): string;
+    /**
+     * 从URL中提取文件名
+     */
+    static getFileNameFromUrl(url: string): string;
+    /**
+     * 解码并保存图片 - 完全对应Python版本的decode_and_save方法
+     */
+    static decodeAndSave(num: number, imageBuffer: Buffer, decodedSavePath: string): Promise<void>;
+}
 export declare class JmOptionImpl implements JmOption {
     dirRule: DirRule;
     client: AdvancedDict;

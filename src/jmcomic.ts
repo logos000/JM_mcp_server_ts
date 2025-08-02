@@ -9,7 +9,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import axios, { AxiosResponse } from 'axios';
 import * as CryptoJS from 'crypto-js';
-import sharp from 'sharp';
+import { execSync } from 'child_process';
+const jimp = require('jimp');
+const Jimp = jimp.Jimp;
 import {
     JmOption,
     JmDownloaderInterface,
@@ -76,7 +78,25 @@ const JmModuleConfig = {
 };
 
 // 图片工具类 - 对应Python的JmImageTool
-class JmImageTool {
+export class JmImageTool {
+    /**
+     * 获取Jimp图片的尺寸（兼容不同版本的Jimp）
+     */
+    private static getImageSize(image: any): { width: number; height: number } {
+        if (typeof image.getWidth === 'function') {
+            // 旧版本Jimp使用方法
+            return { width: image.getWidth(), height: image.getHeight() };
+        } else if (typeof image.width === 'number' && typeof image.height === 'number') {
+            // 新版本Jimp使用属性
+            return { width: image.width, height: image.height };
+        } else if (image.bitmap && typeof image.bitmap.width === 'number' && typeof image.bitmap.height === 'number') {
+            // 从bitmap属性获取
+            return { width: image.bitmap.width, height: image.bitmap.height };
+        } else {
+            throw new Error(`无法获取图片尺寸，Jimp对象结构不符合预期`);
+        }
+    }
+
     /**
      * 获得图片分割数 - 完全对应Python版本
      */
@@ -132,16 +152,63 @@ class JmImageTool {
      * 解码并保存图片 - 完全对应Python版本的decode_and_save方法
      */
     static async decodeAndSave(num: number, imageBuffer: Buffer, decodedSavePath: string): Promise<void> {
+        console.log(`[解码] 开始解码图片: ${path.basename(decodedSavePath)}`);
+        console.log(`[解码] 分割数: ${num}, 原始大小: ${imageBuffer.length} bytes`);
+        
         // 无需解密，直接保存
         if (num === 0) {
+            console.log(`[解码] 分割数为0，直接保存原图`);
             fs.writeFileSync(decodedSavePath, imageBuffer);
             return;
         }
 
         try {
-            // 使用sharp处理图片
-            const image = sharp(imageBuffer);
-            const { width, height } = await image.metadata();
+            console.log(`[解码] 使用jimp读取图片...`);
+            
+            // 检查是否为WebP格式并转换为JPG
+            let processBuffer = imageBuffer;
+            const isWebP = imageBuffer.slice(8, 12).toString() === 'WEBP';
+            
+            if (isWebP) {
+                console.log(`[解码] 检测到WebP格式，转换为JPG...`);
+                try {
+                    // 将WebP buffer转换为JPG buffer
+                    const tempWebpPath = path.join(path.dirname(decodedSavePath), `temp_${Date.now()}.webp`);
+                    const tempJpgPath = path.join(path.dirname(decodedSavePath), `temp_${Date.now()}.jpg`);
+                    
+                    // 先写入临时WebP文件
+                    fs.writeFileSync(tempWebpPath, imageBuffer);
+                    
+                    // 转换为JPG
+                    execSync(`ffmpeg -i "${tempWebpPath}" "${tempJpgPath}"`);
+                    
+                    // 读取转换后的JPG
+                    processBuffer = fs.readFileSync(tempJpgPath);
+                    
+                    // 清理临时文件
+                    fs.unlinkSync(tempWebpPath);
+                    fs.unlinkSync(tempJpgPath);
+                    
+                    console.log(`[解码] WebP转换JPG成功，新大小: ${processBuffer.length} bytes`);
+                } catch (convertError: any) {
+                    console.error(`[解码] WebP转换失败，使用原始buffer:`, convertError.message);
+                    processBuffer = imageBuffer;
+                }
+            }
+            
+            // 使用jimp处理图片
+            console.log(`[解码] 开始使用Jimp读取processBuffer...`);
+            const image = await Jimp.read(processBuffer);
+            console.log(`[解码] Jimp.read返回对象类型:`, typeof image);
+            console.log(`[解码] 对象构造函数:`, image?.constructor?.name);
+            
+            // 获取图片尺寸 - 使用辅助函数
+            const { width, height } = JmImageTool.getImageSize(image);
+            console.log(`[解码] 获取图片尺寸: ${width}x${height}`);
+            
+            // 额外检查尺寸有效性
+            
+            console.log(`[解码] 图片尺寸: ${width}x${height}`);
             
             if (!width || !height) {
                 throw new Error('无法获取图片尺寸');
@@ -154,24 +221,25 @@ class JmImageTool {
             const h = height;
             const over = h % num;
             
-            // 创建解码后的图片
-            const resultImage = sharp({
-                create: {
-                    width: w,
-                    height: h,
-                    channels: 3,
-                    background: { r: 255, g: 255, b: 255 }
-                }
-            });
+            console.log(`[解码] 算法参数: w=${w}, h=${h}, num=${num}, over=${over}`);
+            
+            console.log(`[解码] 创建结果画布: ${w}x${h}`);
+            // 创建解码后的图片 - 使用对象参数格式
+            const resultImage = new Jimp({width: w, height: h});
+            await resultImage;
 
-            const strips: { input: Buffer; top: number; left: number }[] = [];
+            const strips: { image: any; top: number; left: number }[] = [];
 
+            console.log(`[解码] 开始分片处理，共${num}个分片`);
             // 修复后的循环逻辑 - 解决extract_area错误
             for (let i = 0; i < num; i++) {
+                console.log(`[解码] === 处理分片 ${i} ===`);
                 // 每次循环重新计算move - 对应Python的 move = math.floor(h / num)
                 let move = Math.floor(h / num);
                 let ySrc = h - (move * (i + 1)) - over;  // 对应Python的 y_src
                 let yDst = move * i;                     // 对应Python的 y_dst
+
+                console.log(`[解码] 分片 ${i} 初始计算: move=${move}, ySrc=${ySrc}, yDst=${yDst}`);
 
                 // 确保 ySrc 不小于 0
                 ySrc = Math.max(0, ySrc);
@@ -179,12 +247,17 @@ class JmImageTool {
                 // 完全按照Python的条件判断
                 if (i === 0) {
                     move += over;     // 第一个分片加上余数
+                    console.log(`[解码] 分片 ${i} 第一个分片，添加余数: move=${move}`);
                     // 确保第一个分片不会超出图像底部
                     move = Math.min(move, h - ySrc);
+                    console.log(`[解码] 分片 ${i} 限制边界后: move=${move}`);
                 } else {
                     yDst += over;     // 其他分片的目标位置加上余数
+                    console.log(`[解码] 分片 ${i} 非第一个分片，调整目标位置: yDst=${yDst}`);
                 }
 
+                console.log(`[解码] 分片 ${i} 最终参数: ySrc=${ySrc}, yDst=${yDst}, move=${move}`);
+                
                 // 严格验证参数
                 if (ySrc >= h || move <= 0 || ySrc + move > h) {
                     console.log(`[解码] 分片 ${i} 参数无效: ySrc=${ySrc}, move=${move}, h=${h}`);
@@ -197,27 +270,22 @@ class JmImageTool {
                     throw new Error(`无效的分片参数: 分片 ${i} 超出图像范围`);
                 }
 
-                // 处理分片 ${i}
+                console.log(`[解码] 分片 ${i} 开始提取，区域: (0,${ySrc},${w},${move})`);
 
                 try {
                     // 从原图提取分片 - 对应Python的 img_src.crop((0, y_src, w, y_src + move))
-                    // 修复Sharp的extract bug：为每个分片重新创建Sharp实例
-                    const stripBuffer = await sharp(imageBuffer)
-                        .extract({
-                            left: 0,
-                            top: ySrc,
-                            width: w,
-                            height: move
-                        })
-                        .webp()  // 直接使用webp格式，避免PNG转换
-                        .toBuffer();
+                    // 使用jimp提取分片 - 使用对象参数格式
+                    const stripImage = image.clone().crop({x: 0, y: ySrc, w: w, h: move});
+                    const stripSize = JmImageTool.getImageSize(stripImage);
+                    console.log(`[解码] 分片 ${i} 提取成功，尺寸: ${stripSize.width}x${stripSize.height}`);
 
                     // 添加到合成列表 - 对应Python的 img_decode.paste(分片, (0, y_dst, w, y_dst + move))
                     strips.push({
-                        input: stripBuffer,
+                        image: stripImage,
                         top: yDst,
                         left: 0
                     });
+                    console.log(`[解码] 分片 ${i} 已添加到合成列表，目标位置: (0,${yDst})`);
                 } catch (err: any) {
                     console.error(`处理分片 ${i} 时出错:`, err.message);
                     console.log(`[错误详情] 分片 ${i} 参数:
@@ -228,11 +296,29 @@ class JmImageTool {
                 }
             }
 
+            console.log(`[解码] 开始合成最终图片，共${strips.length}个分片`);
             // 合成最终图片并保存 - 对应Python的 cls.save_image(img_decode, decoded_save_path)
-            await resultImage.composite(strips).webp().toFile(decodedSavePath);
+            for (let i = 0; i < strips.length; i++) {
+                const strip = strips[i];
+                const stripSize = JmImageTool.getImageSize(strip.image);
+                console.log(`[解码] 合成分片 ${i}: 位置(${strip.left},${strip.top}), 尺寸${stripSize.width}x${stripSize.height}`);
+                resultImage.composite(strip.image, strip.left, strip.top);
+            }
+            
+            console.log(`[解码] 保存解码后的图片: ${decodedSavePath}`);
+            
+            // 修改保存路径为JPG格式
+            const jpgSavePath = decodedSavePath.replace(/\.webp$/i, '.jpg');
+            console.log(`[解码] 保存为JPG格式: ${jpgSavePath}`);
+            
+            // 使用现代的 await write() 方法（根据官方文档）
+            await resultImage.write(jpgSavePath);
+            console.log(`[解码] 图片解码完成: ${path.basename(jpgSavePath)}`);
 
         } catch (error: any) {
-            console.log(`图片解码失败: ${error.message}，保存原始图片`);
+            console.error(`[解码] 图片解码失败: ${error.message}`);
+            console.error(`[解码] 错误详情:`, error.stack);
+            console.log(`[解码] 保存原始图片作为fallback: ${decodedSavePath}`);
             // 保存原始图片作为fallback
             fs.writeFileSync(decodedSavePath, imageBuffer);
         }
@@ -870,7 +956,9 @@ class JmApiClientImpl implements JmcomicClient {
 
     async downloadImage(imageUrl: string, savePath: string, scrambleId?: number | string, decodeImage: boolean = true): Promise<boolean> {
         try {
-            // 下载图片: ${imageUrl}
+            console.log(`[图片] 开始下载: ${imageUrl}`);
+            console.log(`[图片] 保存路径: ${savePath}`);
+            console.log(`[图片] scrambleId: ${scrambleId}, 是否解码: ${decodeImage}`);
             
             const response = await axios.get(imageUrl, {
                 responseType: 'arraybuffer',
@@ -881,15 +969,19 @@ class JmApiClientImpl implements JmcomicClient {
                 }
             });
 
+            console.log(`[图片] 下载完成，状态码: ${response.status}, 大小: ${response.data.byteLength} bytes`);
+
             const dir = path.dirname(savePath);
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
+                console.log(`[图片] 创建目录: ${dir}`);
             }
 
             const imageBuffer = Buffer.from(response.data);
 
             // 判断是否需要解码图片
             if (!decodeImage || scrambleId === null || scrambleId === undefined) {
+                console.log(`[图片] 不需要解码，直接保存`);
                 // 不解码，直接保存
                 fs.writeFileSync(savePath, imageBuffer);
             } else {
@@ -898,12 +990,18 @@ class JmApiClientImpl implements JmcomicClient {
                 const photoId = this.extractPhotoIdFromUrl(imageUrl);
                 const num = JmImageTool.getNum(scrambleId, photoId, filename);
                 
+                console.log(`[图片] 需要解码，参数: filename=${filename}, photoId=${photoId}, num=${num}`);
                 await JmImageTool.decodeAndSave(num, imageBuffer, savePath);
             }
 
+            console.log(`[图片] 图片处理完成: ${path.basename(savePath)}`);
             return true;
         } catch (error: any) {
-            console.log(`[图片] 下载失败: ${imageUrl}, ${error.message}`);
+            console.error(`[图片] 下载失败: ${imageUrl}`);
+            console.error(`[图片] 错误信息: ${error.message}`);
+            if (error.response) {
+                console.error(`[图片] HTTP状态: ${error.response.status}`);
+            }
             return false;
         }
     }
