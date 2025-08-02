@@ -207,6 +207,19 @@ class ConfigManager {
       if (fs.existsSync(this.configPath)) {
         const configData = fs.readFileSync(this.configPath, 'utf8');
         this.config = yaml.load(configData) as Config || {};
+        
+        // 检查是否在Android/termux环境，如果是且下载目录不正确，则强制更新
+        if (this.isRunningOnAndroidTermux()) {
+          const currentBaseDir = this.config.dir_rule?.base_dir;
+          if (currentBaseDir !== '~/storage/downloads') {
+            console.log('[配置] 检测到Android/Termux环境，强制更新下载目录为: ~/storage/downloads');
+            if (!this.config.dir_rule) {
+              this.config.dir_rule = {};
+            }
+            this.config.dir_rule.base_dir = '~/storage/downloads';
+            this.saveConfig();
+          }
+        }
       } else {
         this.config = this.getDefaultConfig();
         this.saveConfig();
@@ -217,7 +230,57 @@ class ConfigManager {
     }
   }
 
+  private isRunningOnAndroidTermux(): boolean {
+    try {
+      console.log('[检测] 当前工作目录:', process.cwd());
+      console.log('[检测] HOME环境变量:', process.env.HOME);
+      console.log('[检测] PREFIX环境变量:', process.env.PREFIX);
+      console.log('[检测] TERMUX_VERSION环境变量:', process.env.TERMUX_VERSION);
+      
+      // 检查环境变量
+      if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes('com.termux')) {
+        console.log('[检测] 通过环境变量检测到Termux');
+        return true;
+      }
+      
+      // 检查当前工作目录是否在termux路径下
+      const cwd = process.cwd();
+      if (cwd.includes('/data/data/com.termux/files')) {
+        console.log('[检测] 通过工作目录检测到Termux');
+        return true;
+      }
+      
+      // 检查是否存在termux特有的目录
+      const homeStoragePath = process.env.HOME ? path.join(process.env.HOME, 'storage') : '';
+      if (fs.existsSync('/data/data/com.termux')) {
+        console.log('[检测] 通过/data/data/com.termux目录检测到Termux');
+        return true;
+      }
+      
+      if (homeStoragePath && fs.existsSync(homeStoragePath)) {
+        console.log('[检测] 通过~/storage目录检测到Termux');
+        return true;
+      }
+      
+      console.log('[检测] 未检测到Termux环境');
+      return false;
+    } catch (error) {
+      console.log('检测Android/termux环境时出错:', error);
+      return false;
+    }
+  }
+
   private getDefaultConfig(): Config {
+    // 检测是否运行在Android/termux环境
+    const isAndroidTermux = this.isRunningOnAndroidTermux();
+    const defaultDownloadDir = isAndroidTermux ? '~/storage/downloads' : 'C:/Users/Cielo/Downloads';
+    
+    if (isAndroidTermux) {
+      console.log('[配置] 检测到Android/Termux环境，使用下载目录:', defaultDownloadDir);
+    } else {
+      console.log('[配置] 使用默认下载目录:', defaultDownloadDir);
+    }
+    
     return {
       client: {
         domain: {
@@ -235,7 +298,7 @@ class ConfigManager {
         impl: 'api'
       },
       dir_rule: {
-        base_dir: 'C:/Users/Cielo/Downloads'
+        base_dir: defaultDownloadDir
       },
       download: {
         cache: true,
@@ -287,7 +350,23 @@ class ConfigManager {
   }
 
   public getStoragePath(): string {
-    return this.config.dir_rule?.base_dir || 'C:/Users/Cielo/Downloads';
+    let basePath = this.config.dir_rule?.base_dir;
+    
+    // 如果没有配置，使用默认值
+    if (!basePath) {
+      basePath = this.isRunningOnAndroidTermux() ? '~/storage/downloads' : 'C:/Users/Cielo/Downloads';
+    }
+    
+    // 处理 ~ 路径展开
+    if (basePath.startsWith('~/')) {
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      if (homeDir) {
+        basePath = path.join(homeDir, basePath.slice(2));
+      }
+    }
+    
+    console.log('[配置] 最终下载路径:', basePath);
+    return basePath;
   }
 }
 
@@ -1007,13 +1086,15 @@ const pdfConverter = new PDFConverter();
 
 // 初始化简化下载器
 const simpleDownloader = new SimpleJMDownloader(
-  configManager.getConfig().dir_rule?.base_dir || './downloads'
+  configManager.getStoragePath()
 );
 
 // 定义验证规则
 const StringSchema = z.string().describe("字符串");
 const NumberSchema = z.number().describe("数字");
 const BooleanSchema = z.boolean().describe("布尔值");
+// 专辑ID架构 - 支持数字自动转换为字符串
+const AlbumIdSchema = z.coerce.string().describe("专辑ID (数字或字符串)");
 
 // 搜索漫画工具
 server.tool(
@@ -1092,7 +1173,7 @@ Args:
 Returns:
     A JSON string containing the album details.`,
   {
-    album_id: StringSchema.describe("The ID of the album")
+    album_id: AlbumIdSchema.describe("The ID of the album")
   },
   async ({ album_id }) => {
     try {
@@ -1232,61 +1313,83 @@ Args:
     convert_to_pdf: Whether to convert the downloaded images to PDF after download completes.
 
 Returns:
-    A message indicating the download status and PDF conversion status.`,
+    A message indicating the download has started.`,
   {
-    album_id: StringSchema.describe("The ID of the album to download"),
+    album_id: AlbumIdSchema.describe("The ID of the album to download"),
     convert_to_pdf: BooleanSchema.optional().describe("Whether to convert the downloaded images to PDF after download completes")
   },
   async ({ album_id, convert_to_pdf = false }) => {
     try {
       console.log(`[下载] 开始下载专辑 ${album_id}，使用增强下载器`);
       
-      // 使用增强的SimpleJMDownloader
-      const result = await simpleDownloader.downloadAlbum(album_id, false);
+      // 获取下载目录和专辑信息
+      const downloadDir = simpleDownloader.getDownloadDir();
+      let albumTitle = '';
+      let estimatedPath = downloadDir;
       
-      if (!result.success) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `下载失败: ${result.error}`,
-            },
-          ],
-        };
+      try {
+        // 尝试获取专辑信息以构造完整路径
+        const albumInfo = await simpleDownloader.getAlbumInfo(album_id);
+        if (albumInfo.success && albumInfo.title) {
+          albumTitle = albumInfo.title;
+          estimatedPath = path.join(downloadDir, albumInfo.title);
+        }
+      } catch (infoError) {
+        console.log(`[下载] 无法获取专辑信息，使用默认路径: ${infoError}`);
       }
+      
+      // 立即返回开始下载的消息，包含下载地址
+      const startMessage = `✨ 专辑 ${album_id} 下载已开始！\n` +
+        `📁 下载目录: ${downloadDir}\n` +
+        (albumTitle ? `📂 专辑路径: ${estimatedPath}\n` : '') +
+        `下载将在后台进行，请稍后检查下载目录。`;
+      
+      // 在后台执行下载任务
+      setImmediate(async () => {
+        try {
+          // 使用增强的SimpleJMDownloader
+          const result = await simpleDownloader.downloadAlbum(album_id, false);
+          
+          if (!result.success) {
+            console.error(`[下载] 专辑 ${album_id} 下载失败: ${result.error}`);
+            return;
+          }
 
-      // 可选的PDF转换
-      let pdfStatus = '';
-      if (convert_to_pdf && result.downloadedFiles?.directory) {
-        console.log(`[转换] 开始转换专辑 ${album_id} 为PDF`);
-        const pdfSuccess = await pdfConverter.convertAlbumToPdf(
-          result.downloadedFiles.directory, 
-          simpleDownloader.getDownloadDir()
-        );
-        pdfStatus = pdfSuccess ? '\n✅ PDF转换成功！' : '\n❌ PDF转换失败。';
-      }
+          console.log(`[下载] 专辑 ${album_id} 下载完成！`);
+          console.log(`[下载] 标题: ${result.title}`);
+          console.log(`[下载] 作者: ${result.author}`);
+          console.log(`[下载] 下载位置: ${result.downloadedFiles?.directory || '未知'}`);
+          console.log(`[下载] 文件数量: ${result.downloadedFiles?.fileCount || 0}`);
 
-      const message = `专辑 ${album_id} 下载完成！\n` +
-        `标题: ${result.title}\n` +
-        `作者: ${result.author}\n` +
-        `下载位置: ${result.downloadedFiles?.directory || '未知'}\n` +
-        `文件数量: ${result.downloadedFiles?.fileCount || 0}${pdfStatus}`;
+          // 可选的PDF转换
+          if (convert_to_pdf && result.downloadedFiles?.directory) {
+            console.log(`[转换] 开始转换专辑 ${album_id} 为PDF`);
+            const pdfSuccess = await pdfConverter.convertAlbumToPdf(
+              result.downloadedFiles.directory, 
+              simpleDownloader.getDownloadDir()
+            );
+            console.log(`[转换] 专辑 ${album_id} PDF转换${pdfSuccess ? '成功' : '失败'}`);
+          }
+        } catch (error: any) {
+          console.error(`[下载] 专辑 ${album_id} 后台下载失败:`, error);
+        }
+      });
 
       return {
         content: [
           {
             type: "text",
-            text: message,
+            text: startMessage,
           },
         ],
       };
     } catch (error: any) {
-      console.error(`[下载] 专辑 ${album_id} 下载失败:`, error);
+      console.error(`[下载] 专辑 ${album_id} 启动下载失败:`, error);
       return {
         content: [
           {
             type: "text",
-            text: `专辑 ${album_id} 下载失败: ${error.message}`,
+            text: `专辑 ${album_id} 启动下载失败: ${error.message}`,
           },
         ],
       };
@@ -1307,7 +1410,7 @@ Args:
 Returns:
     A message indicating the conversion status.`,
   {
-    album_id: StringSchema.describe("The ID of the album"),
+    album_id: AlbumIdSchema.describe("The ID of the album"),
     album_dir: StringSchema.optional().describe("Optional custom path to the album directory. If not provided, will search for the album by title in the download directory")
   },
   async ({ album_id, album_dir }) => {
@@ -1419,7 +1522,7 @@ Args:
 Returns:
     Detailed album information including chapters and sample images.`,
   {
-    album_id: StringSchema.describe("The ID of the album to get information about")
+    album_id: AlbumIdSchema.describe("The ID of the album to get information about")
   },
   async ({ album_id }) => {
     try {
@@ -1459,76 +1562,87 @@ Args:
     convert_to_pdf: Whether to convert all downloaded albums to PDF.
 
 Returns:
-    A summary of the batch download results.`,
+    A message indicating the batch download has started.`,
   {
-    album_ids: z.array(StringSchema).describe("Array of album IDs to download"),
+    album_ids: z.array(AlbumIdSchema).describe("Array of album IDs to download"),
     convert_to_pdf: BooleanSchema.optional().describe("Whether to convert all downloaded albums to PDF")
   },
   async ({ album_ids, convert_to_pdf = false }) => {
     try {
       console.log(`[批量下载] 开始批量下载 ${album_ids.length} 个专辑`);
       
-      // 使用简化下载器批量下载
-      const results = await simpleDownloader.batchDownload(album_ids, false);
+      // 获取下载目录
+      const downloadDir = simpleDownloader.getDownloadDir();
       
-      // 统计结果
-      const successfulDownloads = results.filter(r => r.success);
-      const failedDownloads = results.filter(r => !r.success);
+      // 立即返回开始下载的消息，包含下载地址
+      const startMessage = `🚀 批量下载已开始！\n` +
+        `正在下载 ${album_ids.length} 个专辑: ${album_ids.join(', ')}\n` +
+        `📁 下载目录: ${downloadDir}\n` +
+        `📂 每个专辑将创建独立的子文件夹\n` +
+        `下载将在后台进行，请稍后检查下载目录。`;
       
-      // 可选的PDF转换
-      let pdfConversions = 0;
-      if (convert_to_pdf && successfulDownloads.length > 0) {
-        console.log(`[批量转换] 开始转换 ${successfulDownloads.length} 个专辑为PDF`);
-        
-        for (const result of successfulDownloads) {
-          if (result.downloadedFiles?.directory) {
-            const pdfSuccess = await pdfConverter.convertAlbumToPdf(
-              result.downloadedFiles.directory,
-              simpleDownloader.getDownloadDir()
-            );
-            if (pdfSuccess) pdfConversions++;
+      // 在后台执行批量下载任务
+      setImmediate(async () => {
+        try {
+          // 使用简化下载器批量下载
+          const results = await simpleDownloader.batchDownload(album_ids, false);
+          
+          // 统计结果
+          const successfulDownloads = results.filter(r => r.success);
+          const failedDownloads = results.filter(r => !r.success);
+          
+          console.log(`[批量下载] 批量下载完成！`);
+          console.log(`[批量下载] 总数: ${album_ids.length}, 成功: ${successfulDownloads.length}, 失败: ${failedDownloads.length}`);
+          
+          // 可选的PDF转换
+          let pdfConversions = 0;
+          if (convert_to_pdf && successfulDownloads.length > 0) {
+            console.log(`[批量转换] 开始转换 ${successfulDownloads.length} 个专辑为PDF`);
+            
+            for (const result of successfulDownloads) {
+              if (result.downloadedFiles?.directory) {
+                const pdfSuccess = await pdfConverter.convertAlbumToPdf(
+                  result.downloadedFiles.directory,
+                  simpleDownloader.getDownloadDir()
+                );
+                if (pdfSuccess) pdfConversions++;
+              }
+            }
+            console.log(`[批量转换] PDF转换完成，成功转换 ${pdfConversions} 个专辑`);
           }
-        }
-      }
 
-      // 生成详细报告
-      let report = `批量下载完成！\n\n`;
-      report += `📊 总体统计:\n`;
-      report += `  总数: ${album_ids.length}\n`;
-      report += `  成功: ${successfulDownloads.length}\n`;
-      report += `  失败: ${failedDownloads.length}\n`;
-      
-      if (convert_to_pdf) {
-        report += `  PDF转换成功: ${pdfConversions}\n`;
-      }
-      
-      report += `\n✅ 成功下载:\n`;
-      successfulDownloads.forEach((result, index) => {
-        report += `  ${index + 1}. ${result.title} (${result.albumId}) - ${result.downloadedFiles?.fileCount || 0} 个文件\n`;
+          // 打印详细结果到控制台
+          console.log(`[批量下载] 成功下载的专辑:`);
+          successfulDownloads.forEach((result, index) => {
+            console.log(`  ${index + 1}. ${result.title} (${result.albumId}) - ${result.downloadedFiles?.fileCount || 0} 个文件`);
+          });
+          
+          if (failedDownloads.length > 0) {
+            console.log(`[批量下载] 下载失败的专辑:`);
+            failedDownloads.forEach((result, index) => {
+              console.log(`  ${index + 1}. ${result.albumId} - ${result.error}`);
+            });
+          }
+        } catch (error) {
+          console.error(`[批量下载] 后台批量下载失败:`, error);
+        }
       });
-      
-      if (failedDownloads.length > 0) {
-        report += `\n❌ 下载失败:\n`;
-        failedDownloads.forEach((result, index) => {
-          report += `  ${index + 1}. ${result.albumId} - ${result.error}\n`;
-        });
-      }
 
       return {
         content: [
           {
             type: "text",
-            text: report,
+            text: startMessage,
           },
         ],
       };
     } catch (error) {
-      console.error(`[批量下载] 批量下载失败:`, error);
+      console.error(`[批量下载] 启动批量下载失败:`, error);
       return {
         content: [
           {
             type: "text",
-            text: `批量下载失败: ${error}`,
+            text: `启动批量下载失败: ${error}`,
           },
         ],
       };

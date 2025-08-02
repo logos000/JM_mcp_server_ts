@@ -26,6 +26,11 @@ export class SimpleJMDownloader {
      * @param downloadDir 下载目录路径
      */
     constructor(downloadDir: string = "downloads") {
+        // 处理 ~ 路径展开
+        if (downloadDir.startsWith('~/')) {
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            downloadDir = path.join(homeDir, downloadDir.slice(2));
+        }
         this.downloadDir = path.resolve(downloadDir);
         
         // 创建下载目录
